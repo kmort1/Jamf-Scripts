@@ -1,0 +1,206 @@
+#!/bin/bash
+#
+####################################################################################################
+#
+# The Apple Software is provided by Apple on an "AS IS" basis.  APPLE
+# MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION
+# THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND
+# OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS.
+#
+# IN NO EVENT SHALL APPLE BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL
+# OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION,
+# MODIFICATION AND/OR DISTRIBUTION OF THE APPLE SOFTWARE, HOWEVER CAUSED
+# AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE),
+# STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+####################################################################################################
+#
+# ABOUT THIS PROGRAM
+#
+# NAME
+#
+# Smartcard-Create_smartcard_recovery.sh
+#
+# The purpose of this script is to create the script Create_smartcard_recovery.sh
+#
+ScriptVersion="2024-09-12"
+# v2023-10-24 -	Added logging to /private/var/log/Smartcard-AttributeMapping.log
+#				Added variable for ExemptionTimeHours - Smart Card Exemption time in hours
+# v2023-12-14 -	Aligned version numbers with all the related smart card scripts
+# v2024-02-05 -	Added support for com.smartcard.workflow.settings configuration profile settings
+# v2024-03-14 - Aligned version numbers with all the related smart card scripts
+# v2024-06-06 - Aligned version numbers with all the related smart card scripts
+# v2024-07-11 - Aligned version numbers with all the related smart card scripts
+# v2024-09-12 - Aligned version numbers with all the related smart card scripts
+#
+####################################################################################################
+#
+# LOGGING AND LOG FILES
+#
+####################################################################################################
+logFile="/private/var/log/smartcard-management.log"
+/usr/bin/touch "$logFile"
+# Purpose: Provides custom logging for the application
+# Use: log "text to log"
+# Dependencies: logFile variable needs to be defined
+
+Shell_Script_Name="$(/usr/bin/basename "${0}")"
+dateFormat=$(/bin/date "+%Y-%m-%d %H:%M:%S %Z:")
+function log () {
+	# Send the echo to stdout
+	/bin/echo $1
+	# Send the echo to the logFile
+	/bin/echo ${dateFormat} ${Shell_Script_Name}: $1 >> "${logFile}"
+}
+#
+####################################################################################################
+#
+# DEFINE VARIABLES & READ IN PARAMETERS
+#
+####################################################################################################
+
+# Custom Configuration Profile Domain
+ConfigurationProfileDomain="com.smartcard.workflow.settings"
+
+# macOS version
+sw_vers_Full=$(/usr/bin/sw_vers -productVersion)
+sw_vers_Full_Integer=$(/usr/bin/sw_vers -productVersion | /usr/bin/awk -F. '{for(i=1; i<=NF; i++) {printf("%02d",$i)}}')
+sw_vers_Major=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 1,2)
+sw_vers_Major_Integer=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 1,2 | /usr/bin/awk -F. '{for(i=1; i<=NF; i++) {printf("%02d",$i)}}')
+sw_vers_MajorNumber=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 2)
+
+# Jamf Environmental Positional Variables.
+# $1 Mount Point
+# $2 Computer Name
+# $3 Current User Name - This can only be used with policies triggered by login or logout.
+# Declare the Environmental Positional Variables so the can be used in function calls.
+mountPoint=$1
+computerName=$2
+username=$3
+currentUser=$(/bin/echo 'show State:/Users/ConsoleUser' | /usr/sbin/scutil | /usr/bin/awk '/Name / { print $3 }')
+currentUserUID=$(id -u "$currentUser")
+computerName=$(/usr/sbin/scutil --get ComputerName)
+
+# log "${computerName} is running macOS version ${sw_vers_Full}"
+
+######
+# HARDCODED VALUE FOR "ExemptionTimeHours" IS SET HERE
+# Jamf Parameter Value Label - Smart Card Exemption time in hours (Default 24 hours)
+ExemptionTimeHours="24"
+# CHECK TO SEE IF A VALUE WAS SPECIFIED VIA CONFIGURLATION PROFILE IF SO, ASSIGN TO "ExemptionTimeHours"
+# If a value is specified via a configuration profile, it will override the hardcoded value in the script.
+ExemptionTimeHours_ConfigProfile=$(/usr/bin/defaults read /Library/Managed\ Preferences/${ConfigurationProfileDomain} ExemptionTimeHours 2> /dev/null)
+if [ "$ExemptionTimeHours_ConfigProfile" != "" ];then
+	log "ExemptionTimeHours_ConfigProfile: $ExemptionTimeHours_ConfigProfile"
+	ExemptionTimeHours="$ExemptionTimeHours_ConfigProfile"
+fi
+
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 4 AND, IF SO, ASSIGN TO "ExemptionTimeHours"
+# If a value is specified via a Jamf policy, it will override the hardcoded value in the script.
+if [ "$4" != "" ];then
+	ExemptionTimeHours="$4"
+fi
+log "ExemptionTimeHours: $ExemptionTimeHours"
+######
+
+####################################################################################################
+########################## Create /Users/Shared/.smartcard_recovery.sh #############################
+####################################################################################################
+
+/bin/rm -f /Users/Shared/pivmanundo.sh
+
+log "Create /Users/Shared/.smartcard_recovery.sh"
+
+# Create the top of Configure script passing variables into the script.
+/bin/cat > "/Users/Shared/.smartcard_recovery.sh" << smartcard_recovery_Script_passing_variables
+#!/bin/sh
+
+#Smartcard Recovery for macOS 10.15.7+ and Apple silicone support 
+#v${ScriptVersion}
+ExemptionTimeHours="${ExemptionTimeHours}"
+smartcard_recovery_Script_passing_variables
+
+# Create the body of Configure script without passing variables into the script. 
+/bin/cat >> "/Users/Shared/.smartcard_recovery.sh" << 'smartcard_recovery_Script'
+ExemptionTimeSeconds=$(($ExemptionTimeHours * 60 * 60))
+
+# Prompt user for account name:
+userPrompt="Please enter the account that requires an exemption from smartcard enforcement: "
+
+printf "\e[1m$userPrompt"
+read uid
+
+# Check for Boot Volume Name. User may have changed from Macintosh HD:
+bootVolumeName=$(/usr/sbin/diskutil apfs listGroups | /usr/bin/awk -F: '/(System)/ { getline; gsub(/^[ \t]+/,"",$2); print "/Volumes/"$2}')
+if [[ -z "$bootVolumeName" ]]; then
+	echo "Boot Volume not found. Use Disk Utility to mount the drive."
+	exit 1
+fi
+
+# Check if user is already exempt:
+userExempt=$(/usr/bin/defaults read "$bootVolumeName"/var/db/dslocal/nodes/Default/users/"$uid" SmartCardEnforcement 2>/dev/null | /usr/bin/awk 'NR==2' | /usr/bin/sed 's/^[ \t]*//')
+if [[ "$userExempt" == "2" ]]; then
+	echo "$uid is already exempt. Resetting SmartCardEnforcement."
+	/usr/bin/defaults delete "$bootVolumeName"/var/db/dslocal/nodes/Default/users/"$uid" SmartCardEnforcement
+fi
+
+# Disable SmartCardEnforcement by setting it in User account:
+/usr/bin/defaults write "$bootVolumeName/var/db/dslocal/nodes/Default/users/$uid" SmartCardEnforcement -array-add 2
+
+# Log the date and time this process is run.
+/usr/bin/defaults write "$bootVolumeName/var/EnterpriseManagement/com.apple.enterprisedeployment" SmartCardRecoveryScriptRunDate -string "$(/bin/date "+%Y-%m-%d")"
+
+# Incriment SmartCard recovery script run count buy 1
+CurrentSmartCardRecoveryScriptRunCount=$(/usr/bin/defaults read "$bootVolumeName/var/EnterpriseManagement/com.apple.enterprisedeployment" SmartCardRecoveryScriptRunCount 2> /dev/null)
+NewSmartCardRecoveryScriptRunCount=$((CurrentSmartCardRecoveryScriptRunCount+1))
+/usr/bin/defaults write "$bootVolumeName/var/EnterpriseManagement/com.apple.enterprisedeployment" SmartCardRecoveryScriptRunCount -int ${NewSmartCardRecoveryScriptRunCount}
+
+# Disable SmartCardEnforcement by setting it in User account:
+arch=$(/usr/bin/arch)
+if [[ "$arch" == "arm64" ]]; then
+    /usr/sbin/diskutil apfs updatePreboot "$bootVolumeName" >/dev/null
+fi
+
+# Create a LaunchDaemon to remove the SmartCardEnforcement attribute from the acount
+# Exemption is removed after 24 hours
+createRemovalLaunchDaemon (){
+local launch_daemon="com.smartcard.exemption"
+local launch_daemon_path="$bootVolumeName"/Library/LaunchDaemons/"$launch_daemon".plist
+
+echo "<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$launch_daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/usr/bin/dscl . -delete /Users/'$uid' SmartCardEnforcement; /bin/rm -f /Library/LaunchDaemons/'$launch_daemon'.plist; /bin/launchctl bootout system/'$launch_daemon'</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>$ExemptionTimeSeconds</integer>
+</dict>
+</plist>" > "$launch_daemon_path"
+# Set proper permissions on launchdaemon:
+if [[ -e "$launch_daemon_path" ]]; then
+    /usr/sbin/chown root:wheel "$launch_daemon_path"
+    /bin/chmod 644 "$launch_daemon_path"
+fi
+}
+
+createRemovalLaunchDaemon
+echo "$uid is now exempt for ${ExemptionTimeHours} hours. Please restart this Mac."
+
+exit 0
+smartcard_recovery_Script
+
+# log "Set permissions for /Users/Shared/.smartcard_recovery.sh"
+/usr/sbin/chown root:wheel "/Users/Shared/.smartcard_recovery.sh"
+/bin/chmod 700 "/Users/Shared/.smartcard_recovery.sh"
+
+exit 0
