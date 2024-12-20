@@ -1,0 +1,324 @@
+#!/bin/bash
+#
+####################################################################################################
+#
+# The Apple Software is provided by Apple on an "AS IS" basis.  APPLE
+# MAKES NO WARRANTIES, EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION
+# THE IMPLIED WARRANTIES OF NON-INFRINGEMENT, MERCHANTABILITY AND FITNESS
+# FOR A PARTICULAR PURPOSE, REGARDING THE APPLE SOFTWARE OR ITS USE AND
+# OPERATION ALONE OR IN COMBINATION WITH YOUR PRODUCTS.
+#
+# IN NO EVENT SHALL APPLE BE LIABLE FOR ANY SPECIAL, INDIRECT, INCIDENTAL
+# OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) ARISING IN ANY WAY OUT OF THE USE, REPRODUCTION,
+# MODIFICATION AND/OR DISTRIBUTION OF THE APPLE SOFTWARE, HOWEVER CAUSED
+# AND WHETHER UNDER THEORY OF CONTRACT, TORT (INCLUDING NEGLIGENCE),
+# STRICT LIABILITY OR OTHERWISE, EVEN IF APPLE HAS BEEN ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+####################################################################################################
+#
+# ABOUT THIS PROGRAM
+#
+# NAME
+#
+# Smartcard-CreateSmartcardLogin_plist.sh
+#
+# This script will create "/etc/SmartcardLogin.plist" for smart card login via AD kerberos caching or PlatformSSO.
+# "man SmartCardServices" for the offline smart card login via kerberos caching example.
+# This also adds support for the "NotEnforcedGroup" option in "/etc/SmartcardLogin.plist".
+# Allowing a local group to be exempt from smart card enforcement.
+#
+ScriptVersion="2024-09-12"
+# v2023-10-24 -	Added logging to /private/var/log/Smartcard-AttributeMapping.log
+#				Added addTrustedAuthoritiesArray - This advanced feature will enforce certificate pinning
+#				For details see: "https://support.apple.com/guide/deployment/advanced-smart-card-options-dep7b2ede1e3"
+# v2023-12-14 - Aligned version numbers with all the related smart card scripts
+# v2024-02-05 -	Added support for com.smartcard.workflow.settings configuration profile settings
+# v2024-03-14 - Aligned version numbers with all the related smart card scripts
+# v2024-06-06 - Aligned version numbers with all the related smart card scripts
+# v2024-07-11 - Aligned version numbers with all the related smart card scripts
+# v2024-09-12 - Added SmartcardLogin.plist formatString variable for Kerberos or PlatformSSO - AttributeMapping_formatString
+#
+####################################################################################################
+#
+# LOGGING AND LOG FILES
+#
+####################################################################################################
+logFile="/private/var/log/smartcard-management.log"
+/usr/bin/touch "$logFile"
+# Purpose: Provides custom logging for the application
+# Use: log "text to log"
+# Dependencies: logFile variable needs to be defined
+
+Shell_Script_Name="$(/usr/bin/basename "${0}")"
+dateFormat=$(/bin/date "+%Y-%m-%d %H:%M:%S %Z:")
+function log () {
+	# Send the echo to stdout
+	/bin/echo $1
+	# Send the echo to the logFile
+	/bin/echo ${dateFormat} ${Shell_Script_Name}: $1 >> "${logFile}"
+}
+#
+####################################################################################################
+#
+# DEFINE VARIABLES & READ IN PARAMETERS
+#
+####################################################################################################
+
+# HARDCODED VALUES ARE SET HERE
+
+# Custom Parameter Variables
+ConfigurationProfileDomain="com.smartcard.workflow.settings"
+
+# macOS version
+sw_vers_Full=$(/usr/bin/sw_vers -productVersion)
+sw_vers_Full_Integer=$(/usr/bin/sw_vers -productVersion | /usr/bin/awk -F. '{for(i=1; i<=NF; i++) {printf("%02d",$i)}}')
+sw_vers_Major=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 1,2)
+sw_vers_Major_Integer=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 1,2 | /usr/bin/awk -F. '{for(i=1; i<=NF; i++) {printf("%02d",$i)}}')
+sw_vers_MajorNumber=$(/usr/bin/sw_vers -productVersion | /usr/bin/cut -d. -f 2)
+
+# Jamf Environmental Positional Variables.
+# $1 Mount Point
+# $2 Computer Name
+# $3 Current User Name - This can only be used with policies triggered by login or logout.
+# Declare the Environmental Positional Variables so the can be used in function calls.
+mountPoint=$1
+computerName=$2
+username=$3
+currentUser=$(/bin/echo 'show State:/Users/ConsoleUser' | /usr/sbin/scutil | /usr/bin/awk '/Name / { print $3 }')
+currentUserUID=$(id -u "$currentUser")
+computerName=$(/usr/sbin/scutil --get ComputerName)
+
+log "Creating /etc/SmarcardLogin.plist"
+
+######
+# HARDCODED VALUE FOR "ExclusionGroupName" IS SET HERE
+# Jamf Parameter Value Label - Smart Card Enforced Exclusion Group Name (default is smartcardexclusion)
+ExclusionGroupName="smartcardexclusion"
+# CHECK TO SEE IF A VALUE WAS SPECIFIED VIA CONFIGURLATION PROFILE IF SO, ASSIGN TO "ExclusionGroupName"
+# If a value is specified via a configuration profile, it will override the hardcoded value in the script.
+ExclusionGroupName_ConfigProfile=$(/usr/bin/defaults read /Library/Managed\ Preferences/${ConfigurationProfileDomain} ExclusionGroupName 2> /dev/null)
+if [ "$ExclusionGroupName_ConfigProfile" != "" ];then
+	log "ExclusionGroupName_ConfigProfile: ${ExclusionGroupName_ConfigProfile}"
+	ExclusionGroupName="$ExclusionGroupName_ConfigProfile"
+fi
+
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 4 AND, IF SO, ASSIGN TO "ExclusionGroupName"
+# If a value is specified via a Jamf policy, it will override the hardcoded value in the script.
+if [ "$4" != "" ];then
+	ExclusionGroupName="$4"
+fi
+log "ExclusionGroupName: ${ExclusionGroupName}"
+######
+
+######
+# HARDCODED VALUE FOR "UsersToExclude" IS SET HERE
+# Jamf Parameter Value Label - Users to exclude (separated by spaces)
+UsersToExclude=""
+# CHECK TO SEE IF A VALUE WAS SPECIFIED VIA CONFIGURLATION PROFILE IF SO, ASSIGN TO "UsersToExclude"
+# If a value is specified via a configuration profile, it will override the hardcoded value in the script.
+UsersToExclude_ConfigProfile=$(/usr/bin/defaults read /Library/Managed\ Preferences/${ConfigurationProfileDomain} UsersToExclude 2> /dev/null)
+if [ "$UsersToExclude_ConfigProfile" != "" ];then
+	log "UsersToExclude_ConfigProfile: ${UsersToExclude_ConfigProfile}"
+	UsersToExclude="$UsersToExclude_ConfigProfile"
+fi
+
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 5 AND, IF SO, ASSIGN TO "UsersToExclude"
+# If a value is specified via a Jamf policy, it will override the hardcoded value in the script.
+if [ "$5" != "" ];then
+    UsersToExclude=$5
+fi
+log "UsersToExclude: ${UsersToExclude}"
+######
+
+######
+# HARDCODED VALUE FOR "TrustedAuthoritiesHashes" IS SET HERE
+# Jamf Parameter Value Label - TrustedAuthorities SHA-256 Hashes (separated by spaces)
+TrustedAuthoritiesHashes=""
+# CHECK TO SEE IF A VALUE WAS SPECIFIED VIA CONFIGURLATION PROFILE IF SO, ASSIGN TO "TrustedAuthoritiesHashes"
+# If a value is specified via a configuration profile, it will override the hardcoded value in the script.
+TrustedAuthoritiesHashes_ConfigProfile=$(/usr/bin/defaults read /Library/Managed\ Preferences/${ConfigurationProfileDomain} TrustedAuthoritiesHashes 2> /dev/null)
+if [ "$TrustedAuthoritiesHashes_ConfigProfile" != "" ];then
+	log "TrustedAuthoritiesHashes_ConfigProfile: ${TrustedAuthoritiesHashes_ConfigProfile}"
+	TrustedAuthoritiesHashes="$TrustedAuthoritiesHashes_ConfigProfile"
+fi
+
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 6 AND, IF SO, ASSIGN TO "TrustedAuthoritiesHashes"
+# If a value is specified via a Jamf policy, it will override the hardcoded value in the script.
+if [ "$6" != "" ];then
+    TrustedAuthoritiesHashes=$6
+fi
+log "TrustedAuthoritiesHashes: ${TrustedAuthoritiesHashes}"
+######
+
+######
+# HARDCODED VALUE FOR "AttributeMapping_formatString" IS SET HERE
+# Jamf Parameter Value Label - SmartcardLogin.plist AttributeMapping formatString ( Kerberos | PlatformSSO )
+AttributeMapping_formatString="Kerberos"
+# CHECK TO SEE IF A VALUE WAS SPECIFIED VIA CONFIGURLATION PROFILE IF SO, ASSIGN TO "AttributeMapping_formatString"
+# If a value is specified via a configuration profile, it will override the hardcoded value in the script.
+AttributeMapping_formatString_ConfigProfile=$(/usr/bin/defaults read /Library/Managed\ Preferences/${ConfigurationProfileDomain} AttributeMapping_formatString 2> /dev/null)
+if [ "$AttributeMapping_formatString_ConfigProfile" != "" ];then
+	log "AttributeMapping_formatString_ConfigProfile: $AttributeMapping_formatString_ConfigProfile"
+	AttributeMapping_formatString="$AttributeMapping_formatString_ConfigProfile"
+fi
+
+# CHECK TO SEE IF A VALUE WAS PASSED IN PARAMETER 7 AND, IF SO, ASSIGN TO "AttributeMapping_formatString"
+# If a value is specified via a Jamf policy, it will override the hardcoded value in the script.
+if [ "$7" != "" ];then
+	AttributeMapping_formatString="$7"
+fi
+log "AttributeMapping_formatString: $AttributeMapping_formatString"
+######
+
+####################################################################################################
+#
+# Functions to call on
+#
+####################################################################################################
+
+#
+### Ensure we are running this script as root ###
+function rootcheck () {
+# log "Begin ${FUNCNAME[0]}"
+if [ "$(/usr/bin/whoami)" != "root" ]; then
+	log "This script must be run as root or sudo."
+	exit 1
+fi
+# log "End ${FUNCNAME[0]}"
+}
+###
+#
+
+#
+### Create SmartcardLogin.plist for Attribute Mapping ###
+function Create_SmartcardLogin_plist (){
+log "Begin ${FUNCNAME[0]}"
+/bin/cat > "/etc/SmartcardLogin.plist" << Attr_Mapping
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AttributeMapping</key>
+	<dict>
+		<key>dsAttributeString</key>
+		<string>dsAttrTypeStandard:AltSecurityIdentities</string>
+		<key>fields</key>
+		<array>
+			<string>NT Principal Name</string>
+		</array>
+		<key>formatString</key>
+		<string>${AttributeMapping_formatString}:\$1</string>
+	</dict>
+	<key>NotEnforcedGroup</key>
+	<string>${ExclusionGroupName}</string>
+</dict>
+</plist>
+Attr_Mapping
+#
+/usr/sbin/chown root:wheel /etc/SmartcardLogin.plist
+/bin/chmod 644 /etc/SmartcardLogin.plist
+/usr/bin/plutil -convert xml1 /etc/SmartcardLogin.plist
+# log "End ${FUNCNAME[0]}"
+}
+###
+#
+
+#
+### add TrustedAuthorities Array
+function addTrustedAuthoritiesArray () {
+# log "Begin ${FUNCNAME[0]}"
+if [[ ${TrustedAuthoritiesHashes} ]] ; then
+	TrustedAuthoritiesHashesArray=(${TrustedAuthoritiesHashes})
+	if [[ -z $(/usr/bin/defaults read /etc/SmartcardLogin.plist TrustedAuthorities 2> /dev/null) ]]; then
+		log "Adding TrustedAuthoritiesHashesArray"
+		/usr/libexec/PlistBuddy -c 'Add :TrustedAuthorities array' /etc/SmartcardLogin.plist
+	fi
+	for TrustedAuthorityHash in "${TrustedAuthoritiesHashesArray[@]}"
+	do
+		log "Adding TrustedAuthorityHash ${TrustedAuthorityHash}"
+		/usr/libexec/PlistBuddy -c "Add :TrustedAuthorities: string ${TrustedAuthorityHash}" /etc/SmartcardLogin.plist 
+	done
+	/usr/bin/plutil -convert xml1 /etc/SmartcardLogin.plist
+fi
+# /bin/echo "End ${FUNCNAME[0]}"
+}
+###
+#
+
+#
+### Get available hidden GID  ###
+function get_unused_hidden_gid () {
+# log "Begin ${FUNCNAME[0]}"
+availableHiddenGID=""
+usedGIDs=($(/usr/bin/dscl . list /Groups PrimaryGroupID | /usr/bin/awk '{if($2<500){print $2}}' | /usr/bin/sort -rnu))
+for availableHiddenGID in $(/usr/bin/seq 499 200); do
+	[[ " ${usedGIDs[@]} " =~ " ${availableHiddenGID} " ]] && continue || /bin/echo $availableHiddenGID; break
+done
+
+if [[ -z ${availableHiddenGID} ]]; then
+	availableHiddenGID="499"
+fi
+# log "End ${FUNCNAME[0]}"
+}
+###
+#
+
+#
+### Create Smart Card Enforced Exclusion Group  ###
+function Create_Group () {
+log "Begin ${FUNCNAME[0]}"
+currentGID=$(/usr/bin/dscacheutil -q group -a name ${ExclusionGroupName} 2> /dev/null | /usr/bin/awk '/gid/ {print $NF}')
+# log "${ExclusionGroupName} GID is currently ${currentGID}"
+if [[ -z ${currentGID} ]] || [[ ${currentGID} -gt 499 ]]; then
+	log "Creating/updating group $ExclusionGroupName."
+	get_unused_hidden_gid
+	/usr/sbin/dseditgroup -q -o delete ${ExclusionGroupName} >/dev/null 2>&1
+	/usr/sbin/dseditgroup -q -o create -i ${availableHiddenGID} ${ExclusionGroupName}
+	# log "${ExclusionGroupName} GID is now ${availableHiddenGID}"
+else
+	log "Updating group $ExclusionGroupName."
+	# log "${ExclusionGroupName} GID ${currentGID} is a hidden group. No need to change the GID."
+	/usr/sbin/dseditgroup -q -o delete ${ExclusionGroupName} >/dev/null 2>&1
+	/usr/sbin/dseditgroup -q -o create -i ${currentGID} ${ExclusionGroupName}
+fi
+# log "End ${FUNCNAME[0]}"
+}
+###
+#
+
+#
+### Populate Smart Card Enforced Exclusion Group  ###
+function Populate_Group () {
+# log "Begin ${FUNCNAME[0]}"
+for EachUser in ${UsersToExclude} ;
+do
+	log "Adding ${EachUser} to ${ExclusionGroupName}"
+	/usr/sbin/dseditgroup -q -o edit -a "${EachUser}" -t user ${ExclusionGroupName}
+done
+# log "End ${FUNCNAME[0]}"
+}
+###
+#
+
+####################################################################################################
+# 
+# SCRIPT CONTENTS
+#
+####################################################################################################
+
+rootcheck
+
+Create_SmartcardLogin_plist
+
+addTrustedAuthoritiesArray
+
+Create_Group
+
+Populate_Group
+
+/usr/bin/defaults write /Library/Preferences/com.apple.security.smartcard allowUnmappedUsers -int 1
+
+exit 0
